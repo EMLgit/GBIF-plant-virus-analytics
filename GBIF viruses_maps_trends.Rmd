@@ -1,0 +1,140 @@
+---
+title: "GBIF viruses"
+author: "emlombardi"
+date: "2024-03-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load libraries 
+
+```{r libraries}
+library(rworldmap)
+library(sp)
+library(dplyr)
+library(janitor)
+library(tidyr)
+library(tidyverse)
+library(rgbif)
+
+```
+
+# Load data
+
+I downloaded the full GBIF data for all viruses and can rerun the same inquiry as needed in the future, too:
+
+```{r}
+#GBIF download (re-run online in future as needed). This includes all viruses from the GBIF repository, including animal and fungal viruses.
+gbifVir <- occ_download_get('0050700-240321170329656') %>%
+  occ_download_import()
+dim(gbifVir)
+names(gbifVir)
+
+gbifVir <- gbifVir %>%
+  mutate(spp.clean = tolower(species),
+         spp.clean = gsub("[^[:alnum:]]", " ", spp.clean))#add a standardized/cleaned species column to join on
+
+
+#Load a list of viruses that infect plants so that you can filter the GBIF download to keep only plant viruses. This is from the ICTV.
+plantVir <- read.csv("~/Desktop/Research/UNM/Herbaria and plant-virus biogeography/VMR_MSL38_v3_plants.csv")
+
+plantVir = plantVir %>%
+  mutate(spp.clean = tolower(Species),
+         spp.clean = gsub("[^[:alnum:]]", " ", spp.clean)) #add a standardized/cleaned species column to join on
+
+
+#filter the gbif data to include only plant viruses, as defined by the family data in the ICTV plantVir dataset (downloaded April 2024)
+
+virDF <- gbifVir %>% #151,689 rows
+  semi_join(plantVir, by = c("family" = "Family")) #removes 758,763 rows from the original GBIF download
+#I may need to be more specific than this to capture PLANT viruses. Maybe go to the genus level? I'm still getting rabies and a bird virus.
+
+virDF2 <- gbifVir %>% #196,693
+  semi_join(plantVir, by = c("genus" = "Genus"))
+
+virDF3 <- gbifVir %>% #73,349
+  semi_join(plantVir, by = c("species" = "Species"))
+
+
+#also retain the rows that were removed to check later
+gbifOther <- gbifVir %>% 
+  anti_join(plantVir, by = c("family" = "Family")) 
+
+
+
+```
+
+
+#Clean virus dataframe up 
+```{r}
+#remove rows without sufficient data
+virDF<-virDF %>%
+  filter(!phylum=="") #removes 8042 rows without phyla 
+
+
+#probably need to find a way to harmonize virus taxonomy, but I'll keep everything with at least a phyla for now (there are a lot of viruses with missing taxonomic information below phyla, too)
+
+```
+
+#Explore data
+```{r}
+families <- as.data.frame(table(virDF$family))
+species <- as.data.frame(table(virDF$species)) #most viruses don't have species information
+spp.verbatim <- as.data.frame(table(virDF$scientificName))
+```
+
+
+#Mapping data
+try joining based on country code
+```{r}
+joinData <- joinCountryData2Map( plantVir,
+                                 joinCode = "ISO2",
+                                 nameJoinColumn = "countryCode", 
+                                 crs=)
+
+theMap <- mapCountryData( joinData, nameColumnToPlot="countryCode", addLegend=FALSE )
+#spTransform(theMap, CRS=CRS("+proj=robin +ellps=WGS84"))
+
+
+#Terra package only
+library(terra)
+w <- geodata::world(path=".")
+plot(w)
+
+rast<- rast(w$GID_0) 
+
+
+library(tmap)
+data("World")
+
+tm_shape(World) +
+    tm_polygons("HPI")
+
+map_nz1 = World +
+  tm_shape(plantVir$countryCode) + tm_raster(col_alpha = 0.7)
+ 
+```
+
+
+```{r}
+try<-st_as_sf(joinData, coords = c("LONG", "LAT"), crs = 28992, agr = "constant")
+
+library(ggplot2)
+library(ggalt)
+library(ggthemes)
+
+wrld <- map_data("world")
+
+gg <- ggplot()
+gg <- gg + geom_map(data=joinData, map=wrld,
+                    aes(x=long, y=lat, map_id=region),
+                    color="#2b2b2b", size=0.15, fill=NA)
+gg <- gg + coord_proj("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+gg <- gg + theme_map()
+gg
+
+
+```
