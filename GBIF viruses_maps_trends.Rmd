@@ -30,8 +30,8 @@ I downloaded the full GBIF data for all viruses and can rerun the same inquiry a
 #GBIF download (re-run online in future as needed). This includes all viruses from the GBIF repository, including animal and fungal viruses.
 gbifVir <- occ_download_get('0050700-240321170329656') %>%
   occ_download_import()
-dim(gbifVir)
-names(gbifVir)
+dim(gbifVir) #910452 rows by 51 cols
+names(gbifVir) 
 
 gbifVir <- gbifVir %>%
   mutate(spp.clean = tolower(species),
@@ -48,93 +48,148 @@ plantVir = plantVir %>%
 
 #filter the gbif data to include only plant viruses, as defined by the family data in the ICTV plantVir dataset (downloaded April 2024)
 
-virDF <- gbifVir %>% #151,689 rows
-  semi_join(plantVir, by = c("family" = "Family")) #removes 758,763 rows from the original GBIF download
-#I may need to be more specific than this to capture PLANT viruses. Maybe go to the genus level? I'm still getting rabies and a bird virus.
+##First remove any records without family level data, at least
+#remove rows without sufficient data
+gbifVir<-gbifVir %>%
+  filter(taxonRank %in% c("GENUS", "SPECIES")) #retain only 808415 records with taxonomic data at the genus or species level
 
-virDF2 <- gbifVir %>% #196,693
-  semi_join(plantVir, by = c("genus" = "Genus"))
+#keep records from gbif that have a match in ICTV Genus or Species columns. I think this is pretty solid!
+virDF2 <- gbifVir %>%
+  filter(genus %in% plantVir$Genus | species %in% plantVir$Species)
 
-virDF3 <- gbifVir %>% #73,349
-  semi_join(plantVir, by = c("species" = "Species"))
 
+virDF <- virDF2 #for now I'm going to work with the data that matches to ICTV genus classification; I can filter on families above if I want to be less strict. 
 
 #also retain the rows that were removed to check later
 gbifOther <- gbifVir %>% 
-  anti_join(plantVir, by = c("family" = "Family")) 
+  anti_join(plantVir, by = c("genus" = "Genus")) 
 
 
 
 ```
 
 
-#Clean virus dataframe up 
+#Check out and clean virus dataframe up 
 ```{r}
-#remove rows without sufficient data
-virDF<-virDF %>%
-  filter(!phylum=="") #removes 8042 rows without phyla 
-
-
 #probably need to find a way to harmonize virus taxonomy, but I'll keep everything with at least a phyla for now (there are a lot of viruses with missing taxonomic information below phyla, too)
 
-```
+length(unique(virDF$species)) #1458 species? This is lower than ICTV, suggesting that there are about 1,000 known species without GBIF records
 
-#Explore data
-```{r}
-families <- as.data.frame(table(virDF$family))
-species <- as.data.frame(table(virDF$species)) #most viruses don't have species information
-spp.verbatim <- as.data.frame(table(virDF$scientificName))
-```
+table(virDF$family) # 56 records without family data, but do have genus data
+table(virDF$species) #13029 records without species data, but do have genus data
 
+
+#Basis of records?
+table(virDF$basisOfRecord) #mostly material samples
+
+
+#When were they recorded
+table(virDF$year)
+hist(virDF$year, breaks=100) #mostly in the last 25ish years
+
+
+#Generally where were they collected/observed? Coarse country-level information
+table(virDF$countryCode) #179 records without country data
+
+#How many records have coordinates?
+virCoords <- virDF %>% filter(!decimalLatitude=="") #9,235 records have coordinates (about 10%; 85,421 do not)
+table(virCoords$basisOfRecord) #65% of preserved specimen have coords
+table(virDF$basisOfRecord)
+
+```
 
 #Mapping data
 try joining based on country code
 ```{r}
-joinData <- joinCountryData2Map( plantVir,
+#aggregate and count records per country
+breaks <- c(0, 10, 100, 1000, 10000)  
+
+country_counts <- virDF %>%
+  group_by(countryCode) %>%
+  summarise(total_recs = n()) %>%
+  mutate(group = cut(total_recs, breaks, labels=FALSE, include.lowest=TRUE)) %>%
+  mutate(cnt.log = log(total_recs))
+
+
+# Merge count data with world map data
+#merged_data <- merge(world_map, country_counts, by.x = "region", by.y = "countryCode", all.x = TRUE)
+
+
+joinData <- joinCountryData2Map( country_counts,
                                  joinCode = "ISO2",
-                                 nameJoinColumn = "countryCode", 
-                                 crs=)
+                                 nameJoinColumn = "countryCode")
 
-theMap <- mapCountryData( joinData, nameColumnToPlot="countryCode", addLegend=FALSE )
-#spTransform(theMap, CRS=CRS("+proj=robin +ellps=WGS84"))
+mapCountryData( joinData, nameColumnToPlot="cnt.log", addLegend=FALSE )
 
-
-#Terra package only
-library(terra)
-w <- geodata::world(path=".")
-plot(w)
-
-rast<- rast(w$GID_0) 
+#change projection 
+par(mai=c(0,0,0.2,0),xaxs="i",yaxs="i")
+#library(rgdal)
+#first get countries excluding Antarctica which crashes spTransform
 
 
-library(tmap)
-data("World")
+#transform to robin for the Robinson projection
+sPDF <- spTransform(joinData, CRS=CRS("+proj=robin +ellps=WGS84"))
 
-tm_shape(World) +
-    tm_polygons("HPI")
+colCounts <- brewer.pal(5,'Reds')
+colDiversity <- brewer.pal(5, 'Blues')
 
-map_nz1 = World +
-  tm_shape(plantVir$countryCode) + tm_raster(col_alpha = 0.7)
- 
+mapCountryData( sPDF, 
+                nameColumnToPlot="total_recs", 
+                mapTitle='GBIF plant virus occurrence by country', 
+                addLegend = FALSE, 
+                numCats = 5,
+                colourPalette = colCounts)
+
+
+####RICHNESS
+vir.richness <- virDF %>%
+  group_by(countryCode, genus) %>%
+  summarise(total_recs = n()) %>%
+  filter(!countryCode=="")
+
+joinData2 <- joinCountryData2Map( vir.richness,
+                                 joinCode = "ISO2",
+                                 nameJoinColumn = "countryCode")
+sPDF2 <- spTransform(joinData2, CRS=CRS("+proj=robin +ellps=WGS84"))
+
+mapCountryData( sPDF2, 
+                nameColumnToPlot="total_recs", 
+                mapTitle='Number of virus genera per country', 
+                addLegend = FALSE, 
+                numCats = 5,
+                colourPalette = colDiversity)
+
+
+#relationship between number of records and number of taxa isolated
+genDiv <- virDF %>%
+  group_by(countryCode, genus) %>%
+  filter(!countryCode=="") %>%
+  summarize(count=n())
+
 ```
 
-
+###Coordinate subset
+Map the records with coordinates
 ```{r}
-try<-st_as_sf(joinData, coords = c("LONG", "LAT"), crs = 28992, agr = "constant")
-
-library(ggplot2)
-library(ggalt)
-library(ggthemes)
-
-wrld <- map_data("world")
-
-gg <- ggplot()
-gg <- gg + geom_map(data=joinData, map=wrld,
-                    aes(x=long, y=lat, map_id=region),
-                    color="#2b2b2b", size=0.15, fill=NA)
-gg <- gg + coord_proj("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
-gg <- gg + theme_map()
-gg
+table(virCoords$year)
 
 
+world_sf <- ne_countries(returnclass = "sf")
+
+world <- ggplot() +
+    geom_sf(data = world_sf, fill = "antiquewhite")  +
+    geom_sf(data = virCoords$geometry, aes(color="darkorchid4")) +
+    coord_sf(crs = "+proj=robin") +
+    theme_minimal_grid() +
+    ggtitle("Robinson projection")
+world
+
+
+swbio.map<-ggplot() + 
+  geom_sf(data=swbio.clip$geometry, aes(fill=swbio.clip$COMMUNITY)) +
+  scale_fill_smoothrainbow(discrete=TRUE, reverse=FALSE) +
+  theme(text=element_text(size=20)) +
+  theme_bw()
 ```
+
+
